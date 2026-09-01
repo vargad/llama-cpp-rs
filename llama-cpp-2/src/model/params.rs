@@ -1,6 +1,8 @@
 //! A safe wrapper around `llama_model_params`.
 
 use crate::context::params::LlamaContextParams;
+#[cfg(feature = "common")]
+use crate::llama_backend::LlamaBackend;
 use crate::model::params::kv_overrides::KvOverrides;
 use crate::LlamaCppError;
 use std::ffi::{c_char, c_void, CStr};
@@ -28,6 +30,37 @@ pub enum FitError {
     /// A hard error occurred during fitting (e.g. model not found at the specified path).
     #[error("hard error during parameter fitting")]
     Error,
+}
+
+/// Estimated memory use and currently available memory for one device.
+///
+/// Results returned by [`LlamaModelParams::device_memory_data`] contain the model's accelerator
+/// devices first and always end with the host/CPU entry.
+#[cfg(feature = "common")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceMemoryData {
+    /// Total memory reported by the device.
+    pub total: i64,
+    /// Free memory reported by the device.
+    pub free: i64,
+    /// Memory required for model weights.
+    pub model: u64,
+    /// Memory required for the context, including the KV cache.
+    pub context: u64,
+    /// Memory required for temporary compute buffers.
+    pub compute: u64,
+}
+
+/// Error returned by [`LlamaModelParams::device_memory_data`].
+#[cfg(feature = "common")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DeviceMemoryDataError {
+    /// The native estimator rejected an argument or produced more entries than supported.
+    #[error("invalid argument or insufficient output capacity for memory estimate")]
+    InvalidArgument,
+    /// The native estimator failed while loading model metadata or creating the dry-run context.
+    #[error("failed to estimate device memory usage")]
+    EstimationFailed,
 }
 
 #[allow(clippy::cast_possible_wrap)]
@@ -424,6 +457,76 @@ impl LlamaModelParams {
         Ok(FitResult {
             n_ctx: cparams.context_params.n_ctx,
         })
+    }
+
+    /// Estimate model, context, and compute-buffer memory per device without allocating them.
+    ///
+    /// The returned vector contains the model's accelerator devices in llama.cpp's device order,
+    /// followed by a host/CPU entry. This performs a metadata-only model load and reserves a
+    /// compute graph, so it is substantially more expensive than querying live free memory.
+    ///
+    /// # Thread safety
+    ///
+    /// This function is **not** thread safe: the underlying C++ call temporarily changes the
+    /// global llama logger.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model metadata cannot be loaded, the dry-run context cannot be
+    /// created, or llama.cpp reports more devices than its advertised maximum.
+    pub fn device_memory_data(
+        &self,
+        _: &LlamaBackend,
+        model_path: &CStr,
+        cparams: &LlamaContextParams,
+        log_level: llama_cpp_sys_2::ggml_log_level,
+    ) -> Result<Vec<DeviceMemoryData>, DeviceMemoryDataError> {
+        let capacity = unsafe { llama_cpp_sys_2::llama_max_devices() } + 1;
+        let mut raw = vec![
+            llama_cpp_sys_2::llama_rs_device_memory_data {
+                total: 0,
+                free: 0,
+                model: 0,
+                context: 0,
+                compute: 0,
+            };
+            capacity
+        ];
+        let mut count = 0;
+
+        let status = unsafe {
+            llama_cpp_sys_2::llama_rs_get_device_memory_data(
+                model_path.as_ptr(),
+                &raw const self.params,
+                &raw const cparams.context_params,
+                raw.as_mut_ptr(),
+                raw.len(),
+                &raw mut count,
+                log_level,
+            )
+        };
+
+        if status == llama_cpp_sys_2::LLAMA_RS_STATUS_INVALID_ARGUMENT {
+            return Err(DeviceMemoryDataError::InvalidArgument);
+        }
+        if status != llama_cpp_sys_2::LLAMA_RS_STATUS_OK {
+            return Err(DeviceMemoryDataError::EstimationFailed);
+        }
+        if count > raw.len() {
+            return Err(DeviceMemoryDataError::InvalidArgument);
+        }
+
+        raw.truncate(count);
+        Ok(raw
+            .into_iter()
+            .map(|data| DeviceMemoryData {
+                total: data.total,
+                free: data.free,
+                model: data.model,
+                context: data.context,
+                compute: data.compute,
+            })
+            .collect())
     }
 }
 
