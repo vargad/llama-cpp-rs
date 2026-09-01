@@ -146,6 +146,59 @@ extern "C" int llama_rs_fit_params(
         log_level));
 }
 
+extern "C" llama_rs_status llama_rs_get_device_memory_data(
+    const char * path_model,
+    const struct llama_model_params * mparams,
+    const struct llama_context_params * cparams,
+    struct llama_rs_device_memory_data * out,
+    size_t out_capacity,
+    size_t * out_count,
+    enum ggml_log_level log_level) {
+    if (!path_model || !mparams || !cparams || !out || !out_count) {
+        return LLAMA_RS_STATUS_INVALID_ARGUMENT;
+    }
+
+    *out_count = 0;
+    ggml_log_callback original_log_callback;
+    void * original_log_user_data;
+    llama_log_get(&original_log_callback, &original_log_user_data);
+    try {
+        std::vector<ggml_backend_dev_t> devs;
+        uint32_t hp_ngl = 0;
+        uint32_t hp_n_ctx_train = 0;
+        uint32_t hp_n_expert = 0;
+        const auto data = common_get_device_memory_data(
+            path_model,
+            mparams,
+            cparams,
+            devs,
+            hp_ngl,
+            hp_n_ctx_train,
+            hp_n_expert,
+            log_level);
+
+        if (data.size() > out_capacity) {
+            *out_count = data.size();
+            return LLAMA_RS_STATUS_INVALID_ARGUMENT;
+        }
+
+        for (size_t i = 0; i < data.size(); ++i) {
+            out[i] = {
+                data[i].total,
+                data[i].free,
+                static_cast<uint64_t>(data[i].model),
+                static_cast<uint64_t>(data[i].context),
+                static_cast<uint64_t>(data[i].compute),
+            };
+        }
+        *out_count = data.size();
+        return LLAMA_RS_STATUS_OK;
+    } catch (...) {
+        llama_log_set(original_log_callback, original_log_user_data);
+        return LLAMA_RS_STATUS_EXCEPTION;
+    }
+}
+
 extern "C" void llama_rs_memory_breakdown_print(const struct llama_context * ctx) {
     common_memory_breakdown_print(ctx);
 }

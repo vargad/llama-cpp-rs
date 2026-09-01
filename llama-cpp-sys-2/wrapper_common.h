@@ -4,6 +4,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 struct llama_model;
 struct llama_sampler;
@@ -56,6 +57,25 @@ int llama_rs_fit_params(
     struct llama_model_tensor_buft_override * tensor_buft_overrides,
     size_t * margins,
     uint32_t n_ctx_min,
+    enum ggml_log_level log_level);
+
+struct llama_rs_device_memory_data {
+    int64_t  total;
+    int64_t  free;
+    uint64_t model;
+    uint64_t context;
+    uint64_t compute;
+};
+
+// Writes one entry per model device followed by the host/CPU entry.
+// `out` must have room for at least llama_max_devices() + 1 entries.
+llama_rs_status llama_rs_get_device_memory_data(
+    const char * path_model,
+    const struct llama_model_params * mparams,
+    const struct llama_context_params * cparams,
+    struct llama_rs_device_memory_data * out,
+    size_t out_capacity,
+    size_t * out_count,
     enum ggml_log_level log_level);
 
 void llama_rs_memory_breakdown_print(const struct llama_context * ctx);
